@@ -1,0 +1,244 @@
+#include <types.h>
+#include <kern/errno.h>
+#include <lib.h>
+#include <machine/pcb.h>
+#include <machine/spl.h>
+#include <machine/trapframe.h>
+#include <kern/callno.h>
+#include <syscall.h>
+#include <thread.h>
+#include <curthread.h>
+
+/*
+ * System call handler.
+ *
+ * A pointer to the trapframe created during exception entry (in
+ * exception.S) is passed in.
+ *
+ * The calling conventions for syscalls are as follows: Like ordinary
+ * function calls, the first 4 32-bit arguments are passed in the 4
+ * argument registers a0-a3. In addition, the system call number is
+ * passed in the v0 register.
+ *
+ * On successful return, the return value is passed back in the v0
+ * register, like an ordinary function call, and the a3 register is
+ * also set to 0 to indicate success.
+ *
+ * On an error return, the error code is passed back in the v0
+ * register, and the a3 register is set to 1 to indicate failure.
+ * (Userlevel code takes care of storing the error code in errno and
+ * returning the value -1 from the actual userlevel syscall function.
+ * See src/lib/libc/syscalls.S and related files.)
+ *
+ * Upon syscall return the program counter stored in the trapframe
+ * must be incremented by one instruction; otherwise the exception
+ * return code will restart the "syscall" instruction and the system
+ * call will repeat forever.
+ *
+ * Since none of the OS/161 system calls have more than 4 arguments,
+ * there should be no need to fetch additional arguments from the
+ * user-level stack.
+ *
+ * Watch out: if you make system calls that have 64-bit quantities as
+ * arguments, they will get passed in pairs of registers, and not
+ * necessarily in the way you expect. We recommend you don't do it.
+ * (In fact, we recommend you don't use 64-bit quantities at all. See
+ * arch/mips/include/types.h.)
+ */
+
+
+void
+mips_syscall(struct trapframe *tf)
+{
+	int callno;
+	int32_t retval;
+	int err;
+
+	assert(curspl==0);
+
+	callno = tf->tf_v0;
+
+	/*
+	 * Initialize retval to 0. Many of the system calls don't
+	 * really return a value, just 0 for success and -1 on
+	 * error. Since retval is the value returned on success,
+	 * initialize it to 0 by default; thus it's not necessary to
+	 * deal with it except for calls that return other values, 
+	 * like write.
+	 */
+
+	retval = 0;
+
+	switch (callno) {
+	    case SYS_reboot:
+		err = sys_reboot(tf->tf_a0);
+		break;
+//write system call
+	    case SYS_write:
+		err = sys_write(tf->tf_a0, (void*) tf->tf_a1, (size_t) tf->tf_a2);
+		break;
+
+	    case SYS_read:
+		//err = sys_read(tf->tf_a0, (void*) tf-> tf_a1, (size_t) tf->tf_a2);
+		break;
+
+	    case SYS_fork:
+		retval = sys_fork(tf, &retval);
+                if(retval == ENOMEM)
+                    err = ENOMEM;
+                else err = 0;
+		break;
+
+	    case SYS_getpid:
+		err = sys_getpid();
+		break;
+		
+		case SYS_waitpid:
+		//err = sys_waitpid((pid_t) tf->tf_a0, (int*) tf-> tf_a1, tf->tf_a2);
+		break;
+
+		case SYS__exit:
+		//err = sys__exit(tf->tf_a0);
+		break;
+
+		case SYS_execv:
+		//err = sys_execv((char*) tf->tf_a0, (char **) tf->tf_a1);
+		break;
+
+	    /* Add stuff here */
+ 
+	    default:
+		kprintf("Unknown syscall %d\n", callno);
+		err = ENOSYS;
+		break;
+	}
+
+
+	if (err) {
+		/*
+		 * Return the error code. This gets converted at
+		 * userlevel to a return value of -1 and the error
+		 * code in errno.
+		 */
+		tf->tf_v0 = err;
+		tf->tf_a3 = 1;      /* signal an error */
+	}
+	else {
+		/* Success. */
+		tf->tf_v0 = retval;
+		tf->tf_a3 = 0;      /* signal no error */
+	}
+	
+	/*
+	 * Now, advance the program counter, to avoid restarting
+	 * the syscall over and over again.
+	 */
+	
+	tf->tf_epc += 4;
+
+	/* Make sure the syscall code didn't forget to lower spl */
+	assert(curspl==0);
+}
+
+void
+md_forkentry(struct trapframe *tf, unsigned long child_addr)
+{
+	/*
+	 * This function is provided as a reminder. You need to write
+	 * both it and the code that calls it.
+	 *
+	 * Thus, you can trash it and do things another way if you prefer.
+	 */
+    struct trapframe local;
+    struct trapframe* ntf;
+    struct addrspace* nas = (struct addrspace*) child_addr;
+    local = *tf;
+    ntf = &local; 
+    
+    ntf->tf_v0 = 0;
+    ntf->tf_a3 = 0;
+    ntf->tf_epc += 4;
+    
+    curthread->t_vmspace = nas;
+    
+    mips_usermode(&local);
+
+}
+
+int 
+sys_write(int fd, const void *buf, size_t nbytes){
+
+// may need to check size using for loop
+// may need to use a lock if test fails
+			
+	if(fd != STDOUT_FILENO && fd!= STDERR_FILENO)
+		return EBADF;
+        
+	char* a = kmalloc(sizeof(char)*nbytes);
+	int error = copyin(buf, a, sizeof(char)*nbytes);
+        if (error == EFAULT) return EFAULT;
+
+        int i;
+        for(i = 0; i < nbytes; i++){
+            putch(a[i]);
+        }
+        kfree(a);
+
+        return 0;
+}
+
+int 
+sys_read(int fd, void *buf, size_t buflen){
+        
+	if(fd != STDIN_FILENO)
+		return EBADF;
+        char* a = kmalloc(sizeof(char)*buflen);
+        int s;
+        for(s = 0; s < buflen; s++){
+            a[s] = getch(); 
+        }
+        int error = copyin(a, buf, sizeof(buf));
+        if (error == EFAULT) return EFAULT;
+        kfree(a);
+        return 0;
+}
+
+
+int
+sys_fork(struct trapframe *tf, int32_t* retval){
+    
+    struct trapframe *child;
+    struct thread* newThread;
+    //dynamically allocate memory for new trapframe
+    child = (struct trapframe*) kmalloc(sizeof(struct trapframe));
+     
+    *child = *tf;
+    
+    //too many processes?
+    if(child == NULL)
+        return ENOMEM;
+    
+    struct thread* new_child;
+    
+    struct addrspace* parentSpace = curthread->t_vmspace;
+    struct addrspace* childSpace; 
+    
+    int copySpace = as_copy(parentSpace, &childSpace);
+    if((childSpace == NULL) || (copySpace !=0))
+        return ENOMEM;
+    
+
+    int result = thread_fork(curthread->t_name, child, (unsigned long)childSpace, md_forkentry, &newThread);
+     //0 if success
+    if(result){
+        kfree(child);
+        return ENOMEM;
+    }
+    
+       *retval = newThread->pID;
+    return newThread->pID;
+}
+
+pid_t sys_getpid(void){
+    return curthread->pID;
+}
