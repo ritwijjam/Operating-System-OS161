@@ -1,0 +1,390 @@
+#include <types.h>
+#include <kern/errno.h>
+#include <lib.h>
+#include <thread.h>
+#include <curthread.h>
+#include <addrspace.h>
+#include <vm.h>
+#include <machine/spl.h>
+#include <machine/tlb.h>
+
+/*
+ * Dumb MIPS-only "VM system" that is intended to only be just barely
+ * enough to struggle off the ground. You should replace all of this
+ * code while doing the VM assignment. In fact, starting in that
+ * assignment, this file is not included in your kernel!
+ */
+
+/* under dumbvm, always have 48k of user stack */
+#define DUMBVM_STACKPAGES    12
+#define DEFAULT_STACK_LIMIT  (8 << 20)
+#define DEFAULT_SBRK_LIMIT (16 << 20)
+
+
+struct addrspace *
+as_create(void)
+{
+	struct addrspace *as = kmalloc(sizeof(struct addrspace));
+	if (as==NULL) {
+		return NULL;
+	}
+
+
+	// initialized every page 
+
+	as->pages = NULL;
+	as->heap = NULL;
+	as->stack = NULL;
+	as->start_heap = (vaddr_t)0;
+	as->finish_heap = (vaddr_t)0;
+	as->region = NULL;
+	return as;
+}
+
+void
+as_destroy(struct addrspace *as)
+{
+	if (as != NULL){
+
+		// destroy the page table
+		struct page_table * pgtabledstryer = as->pages;
+		struct page_table * temp;
+		while (pgtabledstryer != NULL){
+			temp = pgtabledstryer;
+			kfree(temp);
+			free_user_pages(temp->physicalAdd);
+			pgtabledstryer = pgtabledstryer->next;
+		}
+
+		// destroy the region
+		struct regionlist * rgndstryer = as->region;
+		struct regionlist * lol;
+
+		while(rgndstryer != NULL){
+			lol = rgndstryer;
+			kfree(lol);
+			rgndstryer = rgndstryer->next;
+			
+		}
+	}
+	kfree(as);
+}
+
+void
+as_activate(struct addrspace *as)
+{
+	int i, spl;
+
+	(void)as;
+
+	spl = splhigh();
+
+	for (i=0; i<NUM_TLB; i++) {
+		TLB_Write(TLBHI_INVALID(i), TLBLO_INVALID(), i);
+	}
+
+	splx(spl);
+}
+
+int
+as_define_region(struct addrspace *as, vaddr_t vaddr, size_t sz,
+		 int readable, int writeable, int executable)
+{
+	size_t npages; 
+	kprintf("define region %x size %x\n", vaddr, sz);
+
+	/* Align the region. First, the base... */
+	sz += vaddr & ~(vaddr_t)PAGE_FRAME;
+	vaddr &= PAGE_FRAME;
+
+	/* ...and now the length. */
+	sz = (sz + PAGE_SIZE - 1) & PAGE_FRAME;
+
+	npages = sz / PAGE_SIZE;
+
+	/* We don't use these - all pages are read-write */
+	(void)readable;
+	(void)writeable;
+	(void)executable;
+
+	if (as->as_vbase1 == 0) {
+		as->as_vbase1 = vaddr;
+		as->as_npages1 = npages;
+		return 0;
+	}
+
+	if (as->as_vbase2 == 0) {
+		as->as_vbase2 = vaddr;
+		as->as_npages2 = npages;
+		return 0;
+	}
+
+	/*
+	 * Support for more than two regions is not available.
+	 */
+	kprintf("dumbvm: Warning: too many regions\n");
+	return EUNIMP;
+}
+
+
+// set up the page table here
+int
+as_prepare_load(struct addrspace *as)
+{
+	as_define_region(as, 0x80000000 - DEFAULT_STACK_LIMIT, DEFAULT_STACK_LIMIT, 1, 1, 0);
+	as_define_region(as, 0x40000000, DEFAULT_SBRK_LIMIT, 1, 1, 1);
+
+	//return 0;
+
+
+/*
+	assert(as->as_pbase1 == 0);
+	assert(as->as_pbase2 == 0);
+	assert(as->as_stackpbase == 0);
+*/
+
+	paddr_t phys;
+	vaddr_t vir;
+
+
+// temp pointers to help set up page_tables
+
+	struct regionlist *rgnptr;
+	struct page_table *ptptr;
+
+
+	
+
+	for (rgnptr = as->region; rgnptr != NULL; rgnptr = rgnptr->next){
+		vir = rgnptr->virtualB;
+		int i;
+
+		//iterate through all the pages in the region
+		for (i = 0; i < rgnptr->npages; i++){
+			// check all the page_table in the region
+			// if nothing exists 
+			if(as->pages == NULL){
+				as->pages = (struct page_table *)kmalloc(sizeof(struct page_table));
+				as->pages->virtualAdd = vir; 
+				as->pages->permission = rgnptr->permission;
+				as->pages->next = NULL;
+				phys = alloc_user_pages(1); // everytime a new page is assigned 
+				// allocate a user page
+				if (phys == 0)
+					return ENOMEM;
+				as->pages->physicalAdd = phys;
+			}
+			else{
+				// iterate till the end
+				ptptr = as->pages;
+				while (ptptr->next != NULL)
+					ptptr = ptptr->next;
+				// allocate new mem
+				ptptr->next = (struct page_table *)kmalloc(sizeof(struct page_table));
+				// set up virtual address 
+				ptptr->next->virtualAdd = vir;
+				ptptr->next->permission = rgnptr->permission;
+				ptptr->next->next = NULL; // put the page at the very end and set next = NULL
+				phys = alloc_user_pages(1); // everytime a new page is assigned 
+				// allocate a user page
+				if (phys == 0)
+					return ENOMEM;
+				ptptr->next->physicalAdd = phys; // set up physical address
+			}
+
+			vir = vir + PAGE_SIZE; // every time a new page is entered the virtual address is incremented upto the end of the new page to account for mapping 
+		}
+		// moving to the next region
+	}
+/*
+	as->as_pbase1 = getppages(as->as_npages1);
+	if (as->as_pbase1 == 0) {
+		return ENOMEM;
+	}
+
+	as->as_pbase2 = getppages(as->as_npages2);
+	if (as->as_pbase2 == 0) {
+		return ENOMEM;
+	}
+
+	as->as_stackpbase = getppages(DUMBVM_STACKPAGES);
+	if (as->as_stackpbase == 0) {
+		return ENOMEM;
+	}
+*/
+	///////////////// SET UP STACK MY DOOOODSSS YEAAA BOIIIIIIIIIIIIIIIIIII \\\\\\\\\\\\
+
+	vaddr_t stackVAdd = USERSTACK - DUMBVM_STACKPAGES * PAGE_SIZE;
+	ptptr = as->pages;
+	// add to the end of the pages 
+	while (ptptr->next != NULL)
+		ptptr = ptptr->next;
+
+	// create stack 
+	int m;
+	for (m = 0; m < DUMBVM_STACKPAGES; m++){
+		struct page_table *stackDood = (struct page_table *)kmalloc(sizeof(struct page_table));
+		ptptr->next = stackDood;
+		if (m==0)
+			as->stack = stackDood;
+		stackDood->virtualAdd = stackVAdd;
+		stackDood->next = NULL;
+		phys = alloc_user_pages(1);
+		if (phys == 0)
+			return ENOMEM;
+		stackDood->physicalAdd = phys;
+
+		stackVAdd = stackVAdd + PAGE_SIZE; 
+
+		ptptr = ptptr->next;
+	}
+
+
+	///////////////// SET UP HEAP LESSS GO I PULLED AN ALLNIGHTER GG I SUCK \\\\\\\\\\\\
+
+
+	// this is static so we don't need dynamic allocation
+
+	struct page_table  *heapSpace; 
+	heapSpace = (struct page_table *)kmalloc(sizeof(struct page_table));
+	ptptr->next = heapSpace;
+	heapSpace->next = NULL; // LITERALLY THE LAST THING ON MEMORY 
+	phys = alloc_user_pages(1);
+	if (phys == 0)
+		return ENOMEM;
+	
+	// set up physcial and virtual address spaces
+
+	heapSpace->physicalAdd = phys;
+	heapSpace->virtualAdd = vir;	
+	
+
+// heap begin = end at the beginning 
+
+	as->finish_heap = vir;
+
+	as->start_heap = as->finish_heap;
+
+	as->heap = heapSpace;
+
+	if (as->start_heap != 0 || as->finish_heap != 0)
+	{
+		// return warning here
+	}
+
+
+	return 0;
+}
+
+int
+as_complete_load(struct addrspace *as)
+{
+	(void)as;
+	return 0;
+}
+
+int
+as_define_stack(struct addrspace *as, vaddr_t *stackptr)
+{
+	assert(as->as_stackpbase != 0);
+
+	*stackptr = USERSTACK;
+	return 0;
+}
+
+int
+as_copy(struct addrspace *old, struct addrspace **ret)
+{
+	struct addrspace *new;
+
+	struct regionlist *oldptr,*newptr, *temp;
+
+	oldptr = old->region; 
+
+	new = as_create();
+	if (new==NULL) {
+		return ENOMEM;
+	}
+
+while (oldptr != NULL){
+
+		// reset everything
+		// base case
+
+		if (new->region == NULL){
+			new->region = (struct regionlist *) kmalloc(sizeof(struct regionlist));
+			new->region->next = NULL; 
+			newptr = new->region;
+		}
+
+		// new space is already filled up
+		// iterate till you find an empty place
+		else{
+			temp = new->region;
+			while(temp->next != NULL){
+				temp = temp->next;
+			}
+			newptr = (struct regionlist *)kmalloc(sizeof(struct regionlist));
+			temp->next = newptr;
+		}
+
+
+ 	// copy base under the old region to the new region
+		newptr->virtualB = oldptr->virtualB;
+		newptr->physicalB = oldptr->physicalB;
+		newptr->npages = oldptr->npages;
+		newptr->permission = oldptr->permission;
+		newptr->next = NULL; // last thing
+		
+		oldptr = oldptr->next;
+	}
+
+
+/*
+	new->as_vbase1 = old->as_vbase1;
+	new->as_npages1 = old->as_npages1;
+	new->as_vbase2 = old->as_vbase2;
+	new->as_npages2 = old->as_npages2;
+*/
+
+	if (as_prepare_load(new)) {
+		as_destroy(new);
+		return ENOMEM;
+	}
+
+	// copy page data
+	struct page_table *old_page = old->pages;
+	struct page_table *new_page = new->pages;
+
+	while(old_page != NULL){
+		memmove((void *)PADDR_TO_KVADDR(new_page->physicalAdd),
+		(const void *)PADDR_TO_KVADDR(old_page->virtualAdd),
+		PAGE_SIZE);
+
+		// keep on iterating to copy over till the pages in the
+		// region till the very end
+
+		old_page = old_page->next; 
+		new_page = new_page->next;		
+	}
+
+/*
+	assert(new->as_pbase1 != 0);
+	assert(new->as_pbase2 != 0);
+	assert(new->as_stackpbase != 0);
+
+	memmove((void *)PADDR_TO_KVADDR(new->as_pbase1),
+		(const void *)PADDR_TO_KVADDR(old->as_pbase1),
+		old->as_npages1*PAGE_SIZE);
+
+	memmove((void *)PADDR_TO_KVADDR(new->as_pbase2),
+		(const void *)PADDR_TO_KVADDR(old->as_pbase2),
+		old->as_npages2*PAGE_SIZE);
+
+	memmove((void *)PADDR_TO_KVADDR(new->as_stackpbase),
+		(const void *)PADDR_TO_KVADDR(old->as_stackpbase),
+		DUMBVM_STACKPAGES*PAGE_SIZE);
+*/	
+	*ret = new;
+	return 0;
+}

@@ -1,0 +1,464 @@
+#include <types.h>
+#include <kern/errno.h>
+#include <lib.h>
+#include <thread.h>
+#include <curthread.h>
+#include <addrspace.h>
+#include <vm.h>
+#include <machine/spl.h>
+#include <machine/tlb.h>
+
+/*
+ * Dumb MIPS-only "VM system" that is intended to only be just barely
+ * enough to struggle off the ground. You should replace all of this
+ * code while doing the VM assignment. In fact, starting in that
+ * assignment, this file is not included in your kernel!
+ */
+
+/* under dumbvm, always have 48k of user stack */
+#define DUMBVM_STACKPAGES    24
+#define DEFAULT_STACK_LIMIT  0x800000
+#define DEFAULT_SBRK_LIMIT 0x1000000
+
+struct page_structure* coremap;
+unsigned long total_coremap_pages;
+static int preVirtualMem = 1;
+paddr_t lastAddress, firstAddress, spaceAddress;
+
+
+/* Initializes the core map
+*  Checks the amount of pages already busy
+*  Assigns necessary state numbers (busy or not)
+*  Assigns the rest of pages as free
+*/
+
+void
+vm_bootstrap(void)
+{
+	
+	int numPage, coremap_size;
+
+
+
+	paddr_t coremapAddress, tempAddress;
+	
+	// gets amount of RAM left
+	// first and last are two pointers to beginning and end
+
+	ram_getsize(&firstAddress, &lastAddress);
+
+	// number of pages that can be assigned in that free space
+	numPage = (lastAddress - firstAddress) / PAGE_SIZE;
+
+
+	// get total memory left by adding a page structure to size of each page
+
+	spaceAddress =  firstAddress + numPage * sizeof(struct page_structure); 
+	spaceAddress = ROUNDUP(spaceAddress, PAGE_SIZE);
+
+
+	// construct the coremap
+	coremap = (struct page_structure*) PADDR_TO_KVADDR(firstAddress);
+	coremapAddress = spaceAddress - firstAddress;
+	coremap_size = ROUNDUP(coremapAddress, PAGE_SIZE)/PAGE_SIZE;
+
+
+
+
+	total_coremap_pages = numPage;
+
+	int i;
+
+	for (i = 0; i<numPage; i++){
+		if (i < coremap_size){
+			coremap[i].refcount = 1;
+		}
+		else{
+			coremap[i].refcount = 0;
+		}
+		// temp variable to calculate the physcial address
+		tempAddress = PAGE_SIZE * i + spaceAddress;
+		coremap[i].physAdd = tempAddress;
+
+		// convert it to virtual address my dood
+		coremap[i].virAdd = PADDR_TO_KVADDR(tempAddress);
+	}
+
+	preVirtualMem = 0; // virtual memory has been constructed
+
+}
+
+
+/* This function returns npages 
+*  Checks total number of pages and returns the pointer
+*  to the block of free npages from the memory
+*/
+
+
+paddr_t
+getppages(unsigned long npages)
+{
+
+	int spl;
+	paddr_t addr;
+	spl = splhigh();
+
+	// error handling case 
+	// if no virtual mem has been allocated
+	// return npages from the memory
+
+
+	if (preVirtualMem)
+		addr = ram_stealmem(npages);
+	
+
+	else{
+
+			unsigned long firstPage = 0;
+			unsigned long count = npages;
+			unsigned long i;
+
+			for (i = 0; i < total_coremap_pages; i++){
+				// check every core map pages and see which one's free
+
+				if (coremap[i].refcount == 0){
+					count --;
+					// all assigned pages passed on are free right now 
+					if (count == 0){
+						break;
+					}
+				}
+
+				// move the starting address up by one bc that page is not free
+				// reset count and start again
+
+				else{
+					count = npages;
+					firstPage ++; 
+				}
+			}
+
+			// once all the pages in the coremap has been accounted for
+
+			if (i == total_coremap_pages){
+				splx(spl);
+				return 0; 
+			}
+
+			// if it is not all the pages then go to the start address and
+			// assign the rest of the page as busy and used by some process
+			
+			else{
+				for (i = 0; i < npages; i++){
+
+					// generally these pages will be incremented 
+					// but as COW (copy on write) is not used 
+					// so I am setting the reference count to be 1 
+					coremap[i + firstPage].refcount = 1;
+				}
+
+				// return the address to the first page of the chunk
+
+				addr = coremap[firstPage].physAdd; 
+			}
+	}
+	splx(spl);
+	return addr;
+}
+
+/* Allocate/free some kernel-space virtual pages */
+vaddr_t 
+alloc_kpages(int npages)
+{
+	paddr_t pa;
+	pa = getppages(npages);
+	if (pa==0) {
+		return 0;
+	}
+	return PADDR_TO_KVADDR(pa);
+}
+
+/* Allocate/free some user-space virtual pages */
+paddr_t 
+alloc_user_pages(int npages)
+{
+	paddr_t pa;
+	pa = getppages(npages);
+	if (pa==0) {
+		return 0;
+	}
+	return pa;
+}
+
+
+// needs to deallocate page address under addr
+
+void 
+free_kpages(vaddr_t addr)
+{
+
+// To keep a track of pages under the specified page to be deallocated
+	unsigned long i;
+	int spl;
+	spl = splhigh();
+
+	// checks the address of the pages to be freed
+	// if address matches then outaddress = partofpage
+
+
+	for (i = 0; i < total_coremap_pages; i++){
+		if (coremap[i].virAdd == addr){
+			coremap[i].refcount = 0;
+			}
+	}
+	splx(spl);
+
+}
+
+
+void free_user_pages(paddr_t addr){
+	unsigned long i;
+	int spl;
+	spl = splhigh();
+		for (i = 0; i < total_coremap_pages; i++){
+		if (coremap[i].physAdd == addr){
+			coremap[i].refcount = 0;
+			break;
+		}
+	}
+	splx(spl);	
+}
+
+
+int
+vm_fault(int faulttype, vaddr_t faultaddress)
+{
+	vaddr_t vbase1, vtop1, vbase2, vtop2, stackbase, stacktop, heapbase, heaptop;
+	paddr_t paddr;
+	int i;
+	u_int32_t ehi, elo;
+	struct addrspace *as;
+	int spl;
+
+	spl = splhigh();
+
+	faultaddress &= PAGE_FRAME;
+
+	DEBUG(DB_VM, "dumbvm: fault: 0x%x\n", faultaddress);
+
+	switch (faulttype) {
+	    case VM_FAULT_READONLY:
+		/* We always create pages read-write, so we can't get this */
+		panic("dumbvm: got VM_FAULT_READONLY\n");
+	    case VM_FAULT_READ:
+	    case VM_FAULT_WRITE:
+		break;
+	    default:
+		splx(spl);
+		return EINVAL;
+	}
+
+	as = curthread->t_vmspace;
+	if (as == NULL) {
+		/*
+		 * No address space set up. This is probably a kernel
+		 * fault early in boot. Return EFAULT so as to panic
+		 * instead of getting into an infinite faulting loop.
+		 */
+		return EFAULT;
+	}
+
+	/* Assert that the address space has been set up properly. */
+
+
+	assert(as->text->vaddrB != 0);
+	//assert(as->text->paddrB != 0);
+	//assert(as->text->npages != 0);
+	assert(as->data->vaddrB != 0);
+	//assert(as->data->paddrB != 0);
+	//assert(as->data->npages != 0);
+	assert(as->stack->vaddrB != 0);
+	//assert(as->stack->npages != 0);
+	//assert(as->stack->paddrB != 0);
+	assert((as->text->vaddrB & PAGE_FRAME) == as->text->vaddrB);
+	//assert((as->text->paddrB & PAGE_FRAME) == as->text->paddrB);
+	assert((as->data->vaddrB  & PAGE_FRAME) == as->data->vaddrB );
+	//assert((as->data->paddrB  & PAGE_FRAME) == as->data->paddrB);
+	//assert((as->stack->paddrB & PAGE_FRAME) == as->stack->paddrB);
+	assert((as->stack->vaddrB  & PAGE_FRAME) == as->stack->vaddrB );
+
+	vbase1 = as->text->vaddrB ;
+	vtop1 = vbase1 + as->text->npages * PAGE_SIZE;
+	vbase2 = as->data->vaddrB ;
+	vtop2 = vbase2 + as->data->npages * PAGE_SIZE;
+	stackbase = USERSTACK - DEFAULT_STACK_LIMIT;
+	stacktop = USERSTACK;
+	heapbase = as->heap->vaddrB;
+	heaptop = as->maxheap;
+
+	if (faultaddress >= vbase1 && faultaddress < vtop1) {
+		paddr_t ret;
+		ret = checkTable(as, faultaddress);
+		if (ret != NULL)
+			paddr = ret;
+		else {
+
+			//kprintf ("Here -1 \n");
+			struct page_table_entry *newPg = (struct page_table_entry *)kmalloc(sizeof(struct page_table_entry));
+			//kprintf ("Here -1.1 \n");
+			struct page_table_entry *temp = as->page_table;
+			//kprintf ("Here -1.2 \n");
+			while (temp->next != NULL){
+				temp = temp->next;
+			}
+			//kprintf ("Here -1.3 \n");
+			//kprintf ("Here -1 begin \n");
+			temp->next = newPg;
+			//kprintf ("Here -1.4 \n");
+			newPg->next = NULL;
+			//kprintf ("Here -1.5\n");
+			int tempsz = as->text->npages;
+			as->text->npages = tempsz + 1;
+			//kprintf ("Here -1.6 \n"); 
+			paddr = alloc_user_pages(1); // allocating 1 page
+
+			newPg->paddr = paddr;
+			newPg->vaddr = faultaddress;
+			//kprintf ("Here -1.7 \n");
+			//kprintf ("Here -1 end \n");
+
+		}
+
+	}
+	else if (faultaddress >= vbase2 && faultaddress < vtop2) {
+		paddr_t ret;
+		ret = checkTable(as, faultaddress);
+		if (ret != NULL)
+			paddr = ret;
+		else {
+
+			//kprintf ("Here -2 \n");
+			struct page_table_entry *newPg = (struct page_table_entry *)kmalloc(sizeof(struct page_table_entry));
+			struct page_table_entry *temp = as->page_table;
+			while (temp->next != NULL){
+				temp = temp->next;
+			}
+			//kprintf ("Here -2 begin \n");
+			temp->next = newPg;
+			newPg->next = NULL;
+			int tempsz = as->data->npages;
+			as->data->npages = tempsz + 1;
+			paddr = alloc_user_pages(1); // allocating 1 page
+
+			newPg->paddr = paddr;
+			newPg->vaddr = faultaddress;
+			//kprintf ("Here -2 end \n");
+
+		}
+	}
+	else if (faultaddress >= stackbase && faultaddress < stacktop) {
+		paddr_t ret;
+		ret = checkTable(as, faultaddress);
+		if (ret != NULL)
+			paddr = ret;
+		else {
+
+			//kprintf ("Here -3 \n");
+			struct page_table_entry *newPg = (struct page_table_entry *)kmalloc(sizeof(struct page_table_entry));
+			struct page_table_entry *temp = as->page_table;
+			while (temp->next != NULL){
+				temp = temp->next;
+			}
+
+			//kprintf("Here -3 begin\n");
+			temp->next = newPg;
+			newPg->next = NULL;
+			int tempsz = as->stack->npages;
+			as->stack->npages = tempsz + 1;
+			paddr = alloc_user_pages(1); // allocating 1 page
+
+			newPg->paddr = paddr;
+			newPg->vaddr = faultaddress;
+			//kprintf("Here -3 end\n");
+		}
+	}
+	else if (faultaddress >= heapbase && faultaddress < heaptop){
+		paddr_t ret;
+		ret = checkTable(as, faultaddress);
+		if (ret != NULL)
+			paddr = ret;
+		else {
+
+			//kprintf ("Here -4 \n");
+			struct page_table_entry *newPg = (struct page_table_entry *)kmalloc(sizeof(struct page_table_entry));
+			struct page_table_entry *temp = as->page_table;
+			while (temp->next != NULL){
+				temp = temp->next;
+			}
+			//kprintf ("Here -4 begin \n");
+			temp->next = newPg;
+			newPg->next = NULL;
+			int tempsz = as->heap->npages;
+			as->heap->npages = tempsz + 1;
+			paddr = alloc_user_pages(1); // allocating 1 page
+
+			newPg->paddr = paddr;
+			newPg->vaddr = faultaddress;
+			//kprintf ("Here -4 end\n");
+		}
+	}
+	else {
+		splx(spl);
+		return EFAULT;
+	}
+
+	/* make sure it's page-aligned */
+
+	assert((paddr & PAGE_FRAME)==paddr);
+
+	for (i=0; i<NUM_TLB; i++) {
+		
+		TLB_Read(&ehi, &elo, i);
+		//kprintf("Read from TLB \n");
+		if (elo & TLBLO_VALID) {
+			continue;
+		}
+		ehi = faultaddress;
+		elo = paddr | TLBLO_DIRTY | TLBLO_VALID;
+		DEBUG(DB_VM, "dumbvm: 0x%x -> 0x%x\n", faultaddress, paddr);
+		TLB_Write(ehi, elo, i);
+		//kprintf("Wrote to TLB \n");
+		//kprintf("physcial: %x \n", paddr);
+		//kprintf("faultaddress: %x \n", faultaddress);
+		splx(spl);
+		return 0;
+	}
+
+	kprintf("dumbvm: Ran out of TLB entries - cannot handle page fault\n");
+	splx(spl);
+	return EFAULT;
+}
+
+
+paddr_t 
+checkTable(struct addrspace *as, vaddr_t faultaddress){
+
+	paddr_t returnPaddr;
+	// return if v ddr == fault
+
+	struct page_table_entry *find = as->page_table;
+
+	int i;
+
+	while (find!=NULL){
+		if (find->vaddr == faultaddress){
+			returnPaddr = find->paddr;
+			return returnPaddr;
+		}
+		find=find->next;
+	}
+
+	return NULL;
+
+	// if not then create a 
+}

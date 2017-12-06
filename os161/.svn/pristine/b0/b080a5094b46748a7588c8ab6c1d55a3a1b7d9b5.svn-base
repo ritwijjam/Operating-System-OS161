@@ -1,0 +1,65 @@
+#ifndef _VM_H_
+#define _VM_H_
+
+#include <machine/vm.h>
+
+/*
+ * VM system-related definitions.
+ *
+ * You'll probably want to add stuff here.
+ */
+
+
+/* Fault-type arguments to vm_fault() */
+#define VM_FAULT_READ        0    /* A read was attempted */
+#define VM_FAULT_WRITE       1    /* A write was attempted */
+#define VM_FAULT_READONLY    2    /* A write to a readonly page was attempted*/
+#define SIZE_OF_CORE_MAP     100  /* Assume there are only 100 processes to work with */
+
+
+
+// Construct the page table
+
+struct page_structure {
+    
+    /* THESE are the stuff I don't need :
+
+        nothing other than a counter needs to be here 
+        count >1 = it's being shared 
+        ^ can't write to a shared page
+        copy the page if ur going to write into it
+
+    */
+
+    /* where is paged mapped to */
+    struct addrspace* as;
+    
+    // adding physical and virtual addresses
+    vaddr_t virAdd;
+    paddr_t physAdd;
+
+    // To free a an address off of a page
+    int partofpage;
+
+    // if the page has been already used
+    int contained;
+
+    // state = busy or not; busy = 1 & not busy = 0;
+    int state;
+    // don't know when we will be using this 
+};
+
+/* Initialization function */
+void vm_bootstrap(void);
+
+/* Fault handling function called by trap code */
+int vm_fault(int faulttype, vaddr_t faultaddress);
+
+/* Allocate/free kernel heap pages (called by kmalloc/kfree) */
+vaddr_t alloc_kpages(int npages);
+vaddr_t alloc_user_pages(int npages);
+void free_kpages(vaddr_t addr);
+void free_user_pages(vaddr_t addr);
+paddr_t getppages(unsigned long npages);
+
+#endif /* _VM_H_ */

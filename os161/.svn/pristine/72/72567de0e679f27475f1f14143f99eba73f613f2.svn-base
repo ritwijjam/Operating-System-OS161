@@ -1,0 +1,48 @@
+#ifndef _VM_H_
+#define _VM_H_
+
+#include <machine/vm.h>
+
+/*
+ * VM system-related definitions.
+ *
+ * You'll probably want to add stuff here.
+ */
+
+
+/* Fault-type arguments to vm_fault() */
+#define VM_FAULT_READ        0    /* A read was attempted */
+#define VM_FAULT_WRITE       1    /* A write was attempted */
+#define VM_FAULT_READONLY    2    /* A write to a readonly page was attempted*/
+#define SIZE_OF_CORE_MAP     100  /* Assume there are only 100 processes to work with */
+
+
+struct page_struct{
+	paddr_t physicalAddress;
+	off_t pageOffset; // check the page index during swapping
+	struct lock *page_lock;
+};
+
+
+struct coremap_index {
+	struct page_struct *page;
+	vaddr_t virtualAddress;  
+	int hasBeenAllocated; // check if it's already being by a process: 1 = busy, 0 = not occupied
+	int insideKernel; // if inside then: 1 = inside ker, otherwise =0
+	int tlbIn;
+};
+
+struct coremap_index coremap[SIZE_OF_CORE_MAP];
+
+void init_coreMap();
+/* Initialization function */
+void vm_bootstrap(void);
+
+/* Fault handling function called by trap code */
+int vm_fault(int faulttype, vaddr_t faultaddress);
+
+/* Allocate/free kernel heap pages (called by kmalloc/kfree) */
+vaddr_t alloc_kpages(int npages);
+void free_kpages(vaddr_t addr);
+
+#endif /* _VM_H_ */

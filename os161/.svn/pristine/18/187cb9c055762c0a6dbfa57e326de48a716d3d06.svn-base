@@ -1,0 +1,111 @@
+/*
+ * Sample/test code for running a user program.  You can use this for
+ * reference when implementing the execv() system call. Remember though
+ * that execv() needs to do more than this function does.
+ */
+
+#include <types.h>
+#include <kern/unistd.h>
+#include <kern/errno.h>
+#include <lib.h>
+#include <addrspace.h>
+#include <thread.h>
+#include <curthread.h>
+#include <vm.h>
+#include <vfs.h>
+#include <test.h>
+const int PROG_MAX = 4096;
+/*
+ * Load program "progname" and start running it in usermode.
+ * Does not return except on error.
+ *
+ * Calls vfs_open on progname and thus may destroy it.
+ */
+int
+runprogram(char *progname, char **args, unsigned long argc)
+{
+   //kprintf("I am in runprogram\n");
+    if((progname == NULL)||(args == NULL)){
+    	 kprintf("error 10\n");
+     return EFAULT;
+    }
+	struct vnode *v;
+	vaddr_t entrypoint, stackptr;
+	int result;
+        int bufferlen;
+	/* Open the file. */
+        
+	result = vfs_open(progname, O_RDONLY, &v);
+	if (result) {
+		kprintf("error 11\n");
+		return result;
+	}
+
+	/* We should be a new thread. */
+	assert(curthread->t_vmspace == NULL);
+
+	/* Create a new address space. */
+
+	curthread->t_vmspace = as_create();
+	if (curthread->t_vmspace==NULL) {
+		vfs_close(v);
+		return ENOMEM;
+	}
+
+	/* Activate it. */
+	as_activate(curthread->t_vmspace);
+
+	/* Load the executable. */
+	//kprintf("about to enter loadelf");
+	result = load_elf(v, &entrypoint);
+	if (result) {
+		/* thread_exit destroys curthread->t_vmspace */
+		vfs_close(v);
+		kprintf("error 12\n");
+		return result;
+	}
+
+	/* Done with the file now. */
+	vfs_close(v);
+
+	/* Define the user stack in the address space */
+	result = as_define_stack(curthread->t_vmspace, &stackptr);
+	if (result) {
+		kprintf("error 13\n");
+		/* thread_exit destroys curthread->t_vmspace */
+		return result;
+	}
+         
+        
+        
+       int offset, length;
+         int argptr[argc];
+        int i;
+        for(i = argc -1; i >= 0; i--){
+            length = strlen(args[i]) + 1;
+            if(length%4 != 0){
+                 offset = (length + (4 - (length%4)));
+                stackptr = stackptr -(offset);
+            }
+            else{
+                stackptr = stackptr - length;
+            }
+            copyoutstr(args[i], (userptr_t) stackptr, length, &bufferlen);
+            argptr[i]= stackptr;
+        }
+        argptr[argc] = 0;
+        int j;
+        for(j = argc - 1; j >=0; j--){
+           stackptr-=4;
+           copyout(&argptr[j], (userptr_t)stackptr, sizeof(argptr[j])); 
+        }
+	/* Warp to user mode. */
+
+	md_usermode(argc, (userptr_t)stackptr /*userspace addr of argv*/,
+		    stackptr, entrypoint);
+	
+	/* md_usermode does not return */
+	panic("md_usermode returned\n");
+	return EINVAL;
+}
+

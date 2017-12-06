@@ -1,0 +1,10 @@
+/homes/k/khanmo87/ece344/os161/sbin/mksfs/mksfs.c=/homes/k/khanmo87/ece344/os161/sbin/mksfs#-Wall -W -Wwrite-strings -O2 -I/homes/k/khanmo87/ece344/root/hostinclude -DHOST -MM mksfs.c disk.c support.c
+/homes/k/khanmo87/ece344/os161/sbin/mksfs/disk.c=/homes/k/khanmo87/ece344/os161/sbin/mksfs#-Wall -W -Wwrite-strings -O2 -I/homes/k/khanmo87/ece344/root/hostinclude -DHOST -MM mksfs.c disk.c support.c
+/homes/k/khanmo87/ece344/os161/sbin/mksfs/support.c=/homes/k/khanmo87/ece344/os161/sbin/mksfs#-Wall -W -Wwrite-strings -O2 -I/homes/k/khanmo87/ece344/root/hostinclude -DHOST -MM mksfs.c disk.c support.c
+/homes/k/khanmo87/ece344/os161/sbin/dumpsfs/disk.c=/homes/k/khanmo87/ece344/os161/sbin/dumpsfs#-Wall -W -Wwrite-strings -O2 -I/homes/k/khanmo87/ece344/root/hostinclude -DHOST -MM dumpsfs.c disk.c support.c
+/homes/k/khanmo87/ece344/os161/sbin/dumpsfs/dumpsfs.c=/homes/k/khanmo87/ece344/os161/sbin/dumpsfs#-Wall -W -Wwrite-strings -O2 -I/homes/k/khanmo87/ece344/root/hostinclude -DHOST -MM dumpsfs.c disk.c support.c
+/homes/k/khanmo87/ece344/os161/sbin/dumpsfs/support.c=/homes/k/khanmo87/ece344/os161/sbin/dumpsfs#-Wall -W -Wwrite-strings -O2 -I/homes/k/khanmo87/ece344/root/hostinclude -DHOST -MM dumpsfs.c disk.c support.c
+/homes/k/khanmo87/ece344/os161/lib/hostcompat/time.c=/homes/k/khanmo87/ece344/os161/lib/hostcompat#-Wall -W -Wwrite-strings -O2 -I/homes/k/khanmo87/ece344/root/hostinclude -MM err.c time.c hostcompat.c
+/homes/k/khanmo87/ece344/os161/lib/hostcompat/hostcompat.c=/homes/k/khanmo87/ece344/os161/lib/hostcompat#-Wall -W -Wwrite-strings -O2 -I/homes/k/khanmo87/ece344/root/hostinclude -MM err.c time.c hostcompat.c
+/homes/k/khanmo87/ece344/os161/lib/hostcompat/err.c=/homes/k/khanmo87/ece344/os161/lib/hostcompat#-Wall -W -Wwrite-strings -O2 -I/homes/k/khanmo87/ece344/root/hostinclude -MM err.c time.c hostcompat.c
+/homes/k/khanmo87/ece344/os161/bin/sh/sh.c=/homes/k/khanmo87/ece344/os161/bin/sh#-Wall -W -Wwrite-strings -O2 -I/homes/k/khanmo87/ece344/root/hostinclude -DHOST -MM sh.c

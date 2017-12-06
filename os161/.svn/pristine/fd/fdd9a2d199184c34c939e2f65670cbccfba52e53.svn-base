@@ -1,0 +1,363 @@
+#include <types.h>
+#include <kern/errno.h>
+#include <lib.h>
+#include <thread.h>
+#include <curthread.h>
+#include <addrspace.h>
+#include <vm.h>
+#include <machine/spl.h>
+#include <machine/tlb.h>
+
+/*
+ * Dumb MIPS-only "VM system" that is intended to only be just barely
+ * enough to struggle off the ground. You should replace all of this
+ * code while doing the VM assignment. In fact, starting in that
+ * assignment, this file is not included in your kernel!
+ */
+
+/* under dumbvm, always have 48k of user stack */
+#define DUMBVM_STACKPAGES    24
+#define DEFAULT_STACK_LIMIT  0x800000
+#define DEFAULT_SBRK_LIMIT 0x1000000
+
+
+struct addrspace *
+as_create(void)
+{
+
+
+	struct addrspace *as = kmalloc(sizeof(struct addrspace));
+	if (as==NULL) {
+		return NULL;
+	}
+
+	as->heap = kmalloc(sizeof(struct region));
+	as->data = kmalloc(sizeof(struct region));
+	as->text = kmalloc(sizeof(struct region));
+	as->stack = kmalloc(sizeof(struct region));
+
+
+
+	as->heap->vaddrB = 0;
+	as->heap->npages = 0;
+	
+
+	as->data->vaddrB = 0;
+	as->data->npages = 0;	
+	
+
+
+	as->text->vaddrB = 0;
+	as->text->npages = 0;
+
+
+
+	as->stack->vaddrB = 0;
+	as->stack->npages = 0;
+	
+
+	as->maxstack = USERSTACK;
+	as->maxheap  = 0;
+    as->heap_end = 0;
+
+	as->page_table = (struct page_table_entry *)kmalloc(sizeof(struct page_table_entry)); // create a page table to hold all the pages
+
+
+	as->page_table->vaddr = 0x0;
+	as->page_table->paddr = 0x0;
+	kprintf("creation in as_create, page table address 0x%x\n", as->page_table);
+	//kprintf("first creating this vaddr - 0x%x and paddr - 0x%x \n", as->page_table->vaddr, as->page_table->paddr);
+	//as->page_table->head = 1;
+
+	return as;
+}
+
+void
+as_destroy(struct addrspace *as)
+{
+	if (as == NULL)
+		return;
+
+	struct page_table_entry * temp = as->page_table;
+	//kprintf("temp init v_val: 0x%x p_val: 0x%x \n", temp->vaddr, temp->paddr);
+	while(temp != NULL){
+		//kprintf("temp->next before: 0x%x \n", temp->next);
+		//kprintf("trying to free this page: 0x%x \n", temp->paddr);
+		free_user_pages(temp->paddr);
+		temp->paddr = NULL;
+		//kprintf("freed the page\n");
+		struct page_table_entry * temptemp;
+
+		kprintf("kfree in as_destroy 0x%x\n", temp);
+		temptemp = temp->next;
+		if(temptemp == 0xdeadbeef || temptemp == NULL){
+			kprintf("LOL\n");
+			kfree(temp);
+			temp = NULL;
+			//temptemp = NULL;
+			kprintf("value of temptemp 0x%x\n", temptemp);
+			break;
+		}
+		kfree(temp);
+		temp = NULL;
+		temp = temptemp;
+		kprintf("value of temptemp 0x%x\n", temptemp);
+		kprintf("value of temp 0x%x\n", temp);
+
+	}
+	temp = NULL;
+	kfree(as->heap);
+	as->heap = NULL;
+	kfree(as->data);
+	as->data = NULL;
+	kfree(as->stack);
+	as->stack = NULL;
+	kfree(as->text);
+	as->text = NULL;
+	kfree(as);
+	as = NULL;
+}
+
+void
+as_activate(struct addrspace *as)
+{
+	int i, spl;
+
+	(void)as;
+
+	spl = splhigh();
+
+	for (i=0; i<NUM_TLB; i++) {
+		TLB_Write(TLBHI_INVALID(i), TLBLO_INVALID(), i);
+	}
+
+	splx(spl);
+}
+
+int
+as_define_region(struct addrspace *as, vaddr_t vaddr, size_t sz,
+		 int readable, int writeable, int executable)
+{
+	assert(as!=NULL);
+	size_t npages; 
+
+	/* Align the region. First, the base... */
+	sz += vaddr & ~(vaddr_t)PAGE_FRAME;
+	vaddr &= PAGE_FRAME;
+
+	/* ...and now the length. */
+	sz = (sz + PAGE_SIZE - 1) & PAGE_FRAME;
+
+	npages = sz / PAGE_SIZE;
+
+	/* We don't use these - all pages are read-write */
+	(void)readable;
+	(void)writeable;
+	(void)executable;
+
+
+	if (as->text->vaddrB == 0) {
+		as->text->vaddrB = vaddr;
+		as->text->npages = npages;
+		return 0;
+	}
+
+
+	if (as->data->vaddrB == 0) {
+		as->data->vaddrB= vaddr;
+		as->data->npages = npages;
+		return 0;
+	}
+
+	/*
+	 * Support for more than two regions is not available.
+	 */
+	kprintf("dumbvm: Warning: too many regions\n");
+	return EUNIMP;
+}
+
+int
+as_prepare_load(struct addrspace *as)
+{
+
+	if(as->text->vaddrB > as->data->vaddrB) {
+		as->heap->vaddrB = ROUNDUP(as->text->vaddrB + (as->text->npages+1)*PAGE_SIZE, PAGE_SIZE);
+                as->heap_end = as->heap->vaddrB;
+	} else {
+		as->heap->vaddrB = ROUNDUP(as->data->vaddrB + (as->data->npages+1)*PAGE_SIZE , PAGE_SIZE);
+                as->heap_end = as->heap->vaddrB;
+	}
+
+	as->maxheap = (as->heap->vaddrB) + DEFAULT_SBRK_LIMIT;
+	as->stack->vaddrB = as->maxstack - DEFAULT_STACK_LIMIT;
+	int s_page = (USERSTACK - as->stack->vaddrB)/PAGE_SIZE;
+
+	as->stack->npages = s_page;
+	/*
+	kprintf("stack base vaddr, %p\n", as->stack->vaddrB);
+	kprintf("stack page size %d\n", as->stack->npages);
+
+	kprintf("heap base vaddr, %p\n", as->heap->vaddrB);
+	kprintf("heap page size %d\n", as->heap->npages);
+	kprintf("heap top vaddr %p\n", as->heap_end);    */    
+	return 0;
+}
+
+int
+as_complete_load(struct addrspace *as)
+{
+	/*
+	kprintf("data vaddr, %p\n", as->data->vaddrB);
+	kprintf("data page size %d\n", as->data->npages);
+
+	kprintf("text vaddr, %p\n", as->text->vaddrB);
+	kprintf("text page size %d\n", as->text->npages);
+
+	kprintf("stack vaddr, %p\n", USERSTACK);
+	kprintf("stack page size %d\n", as->stack->npages);
+
+	kprintf("heap vaddr, %p\n", as->heap->vaddrB);
+	kprintf("heap page size %d\n", as->heap->npages);
+	*/
+
+	(void)as;
+	return 0;
+}
+
+int
+as_define_stack(struct addrspace *as, vaddr_t *stackptr)
+{
+	//assert(as->stack->vaddrB != 0);
+	
+	*stackptr = USERSTACK;
+	//as->stack->vaddrB = USERSTACK;
+
+
+	return 0;
+}
+
+int
+as_copy(struct addrspace *old, struct addrspace **ret)
+{
+	//print everything for old
+
+	struct addrspace *new;
+        
+	new = as_create();
+	if (new==NULL) {
+		return ENOMEM;
+	}
+
+    new->data->vaddrB =  old->data->vaddrB;
+  
+	new->data->npages =  old->data->npages;	
+    new->text->vaddrB =  old->text->vaddrB;
+
+	new->text->npages =  old->text->npages;	
+    new->stack->vaddrB =  old->stack->vaddrB;
+
+	new->stack->npages =  old->stack->npages;
+    new->heap->vaddrB =  old->heap->vaddrB;
+    
+	new->heap->npages =  old->heap->npages;  // this should be zero anyway
+
+	new->heap_end = old->heap;
+	new->maxstack = old->maxstack;
+	new->maxheap = old->maxheap;
+        
+   if (as_prepare_load(new)) {
+		as_destroy(new);
+		return ENOMEM;
+	}
+
+	// my dood we don't assign any physical address to the base region
+	// only physical address was needed in page_table
+        
+/*
+
+        new->data->paddrB = getppages(new->data->npages);
+        new->text->paddrB = getppages(new->text->npages);
+      	new->stack->paddrB = getppages(new->stack->npages);
+       	new->heap->paddrB = getppages(new->heap->npages);
+        
+       	//kprintf("size of old heap %d \n", old->heap->npages);
+
+        assert(new->data->paddrB != 0);
+        assert(new->text->paddrB != 0);
+
+
+        if (old->stack->npages != 0)
+        	assert(new->stack->paddrB != 0);
+        if (old->heap->npages)
+        	assert(new->heap->paddrB != 0);
+        
+        //copy mem block
+        memmove((void *)PADDR_TO_KVADDR(new->data->paddrB),
+		(const void *)PADDR_TO_KVADDR(old->data->paddrB),
+		old->data->npages*PAGE_SIZE);
+         
+	
+        //text
+
+       
+		//copy mem block
+        memmove((void *)PADDR_TO_KVADDR(new->text->paddrB),
+		(const void *)PADDR_TO_KVADDR(old->text->paddrB),
+		old->text->npages*PAGE_SIZE);
+      
+        //stack
+
+       
+        //copy mem block
+        if (old->stack->npages != 0)
+	        memmove((void *)PADDR_TO_KVADDR(new->stack->paddrB),
+			(const void *)PADDR_TO_KVADDR(old->stack->paddrB),
+			old->stack->npages*PAGE_SIZE);
+          
+         
+        //heap
+        if (old->heap->npages)
+	        memmove((void *)PADDR_TO_KVADDR(new->heap->paddrB),
+			(const void *)PADDR_TO_KVADDR(old->heap->paddrB),
+			old->heap->npages*PAGE_SIZE);
+
+*/
+
+       //copy page tables
+	   struct page_table_entry *temp1 = old->page_table;
+       struct page_table_entry *temp2 = new->page_table;
+
+  
+        while(temp1 != NULL){
+
+           
+		memmove((void *)PADDR_TO_KVADDR(new->page_table->paddr),
+		(const void *)PADDR_TO_KVADDR(old->page_table->paddr),
+		PAGE_SIZE);
+
+             //kprintf("Passes here \n");
+            if(temp1 != NULL){
+            temp2 = (struct page_table_entry *)kmalloc(sizeof(struct page_table_entry));
+            temp2->paddr = alloc_user_pages(1);
+            temp2->vaddr = temp1->vaddr;
+
+
+            temp1 = temp1->next;
+            temp2 = temp2->next;
+
+            }
+
+        }
+        //kprintf("left loop \n");
+        //print and compare
+        //old
+	/* all pages need to be cleared to 0 */
+	/* Put stuff here for your VM system */
+
+
+
+
+        *ret = new;
+
+	return 0;
+}
