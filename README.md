@@ -1,3 +1,5 @@
+== PLEASE NOTE: This is a instructional tool used at the University of Toronto for Kernel Development of an Operating System. Any attempt to copy this code would be considered as an act of plaigarism == 
+
 OS161
 =====
 
